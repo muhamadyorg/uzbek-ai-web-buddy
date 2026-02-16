@@ -67,12 +67,11 @@ const Users = () => {
     }
     setCreating(true);
 
-    // Sign up via edge function or directly
-    const { data, error } = await supabase.auth.signUp({
-      email: newEmail,
-      password: newPassword,
-      options: { data: { full_name: newName } },
+    const { data, error: fnError } = await supabase.functions.invoke("create-user", {
+      body: { email: newEmail, password: newPassword, full_name: newName },
     });
+
+    const error = fnError || (data?.error ? { message: data.error } : null);
 
     if (error) {
       toast.error(error.message);
