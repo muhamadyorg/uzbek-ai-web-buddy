@@ -3,10 +3,10 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { Clock, ChevronLeft, ChevronRight, CheckCircle } from "lucide-react";
+import { Clock, ChevronLeft, ChevronRight, CheckCircle, XCircle, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import ImageLightbox from "@/components/ImageLightbox";
 
 interface QuestionWithOptions {
   id: string;
@@ -16,26 +16,28 @@ interface QuestionWithOptions {
 }
 
 const TOTAL_QUESTIONS = 20;
-const TIME_LIMIT = 25 * 60; // 25 minutes in seconds
+const TIME_LIMIT = 25 * 60;
+const MAX_WRONG = 2;
 
 const Test = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [questions, setQuestions] = useState<QuestionWithOptions[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [selectedOption, setSelectedOption] = useState<string | null>(null);
+  const [confirmedAnswers, setConfirmedAnswers] = useState<Record<string, { optionId: string; isCorrect: boolean }>>({});
   const [timeLeft, setTimeLeft] = useState(TIME_LIMIT);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isFinished, setIsFinished] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [results, setResults] = useState<{ correct: number; total: number } | null>(null);
+  const [results, setResults] = useState<{ correct: number; wrong: number; total: number; passed: boolean } | null>(null);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [wrongCount, setWrongCount] = useState(0);
 
   // Fetch random questions
   useEffect(() => {
     const fetchQuestions = async () => {
       if (!user) return;
-
-      // Get all questions with options
       const { data: allQuestions } = await supabase
         .from("questions")
         .select("id, question_text, image_url");
@@ -45,10 +47,7 @@ const Test = () => {
         return;
       }
 
-      // Shuffle and pick 20
       const shuffled = allQuestions.sort(() => Math.random() - 0.5).slice(0, TOTAL_QUESTIONS);
-
-      // Fetch options for selected questions
       const qIds = shuffled.map((q) => q.id);
       const { data: options } = await supabase
         .from("question_options")
@@ -58,14 +57,11 @@ const Test = () => {
 
       const questionsWithOpts: QuestionWithOptions[] = shuffled.map((q) => ({
         ...q,
-        options: (options?.filter((o) => o.question_id === q.id) ?? []).sort(
-          () => Math.random() - 0.5
-        ),
+        options: (options?.filter((o) => o.question_id === q.id) ?? []).sort(() => Math.random() - 0.5),
       }));
 
       setQuestions(questionsWithOpts);
 
-      // Create session
       const { data: session } = await supabase
         .from("test_sessions")
         .insert({ user_id: user.id, total_questions: questionsWithOpts.length })
@@ -94,20 +90,56 @@ const Test = () => {
     return () => clearInterval(interval);
   }, [isFinished, loading]);
 
-  const selectAnswer = (questionId: string, optionId: string) => {
-    if (isFinished) return;
-    setAnswers((prev) => ({ ...prev, [questionId]: optionId }));
+  // F key for lightbox
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "f" || e.key === "F") {
+        const currentQ = questions[currentIndex];
+        if (currentQ?.image_url && !lightboxSrc) {
+          setLightboxSrc(currentQ.image_url);
+        }
+      }
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [questions, currentIndex, lightboxSrc]);
+
+  const confirmAnswer = () => {
+    if (!selectedOption || isFinished) return;
+    const currentQ = questions[currentIndex];
+    if (confirmedAnswers[currentQ.id]) return;
+
+    const opt = currentQ.options.find((o) => o.id === selectedOption);
+    const isCorrect = opt?.is_correct ?? false;
+
+    setConfirmedAnswers((prev) => ({
+      ...prev,
+      [currentQ.id]: { optionId: selectedOption, isCorrect },
+    }));
+
+    if (!isCorrect) {
+      const newWrongCount = wrongCount + 1;
+      setWrongCount(newWrongCount);
+      if (newWrongCount > MAX_WRONG) {
+        finishTest(newWrongCount);
+        return;
+      }
+    }
+
+    setSelectedOption(null);
   };
 
-  const finishTest = useCallback(async () => {
+  const finishTest = useCallback(async (finalWrongCount?: number) => {
     if (isFinished || !sessionId) return;
     setIsFinished(true);
 
     let correct = 0;
+    let wrong = finalWrongCount ?? wrongCount;
+
     const answerInserts = questions.map((q) => {
-      const selectedId = answers[q.id] ?? null;
-      const selectedOpt = q.options.find((o) => o.id === selectedId);
-      const isCorrect = selectedOpt?.is_correct ?? false;
+      const confirmed = confirmedAnswers[q.id];
+      const selectedId = confirmed?.optionId ?? null;
+      const isCorrect = confirmed?.isCorrect ?? false;
       if (isCorrect) correct++;
       return {
         session_id: sessionId,
@@ -117,14 +149,21 @@ const Test = () => {
       };
     });
 
+    // Recalculate wrong from confirmed answers
+    if (finalWrongCount === undefined) {
+      wrong = Object.values(confirmedAnswers).filter((a) => !a.isCorrect).length;
+    }
+
+    const passed = wrong <= MAX_WRONG;
+
     await supabase.from("test_answers").insert(answerInserts);
     await supabase
       .from("test_sessions")
       .update({ is_completed: true, score: correct, finished_at: new Date().toISOString() })
       .eq("id", sessionId);
 
-    setResults({ correct, total: questions.length });
-  }, [isFinished, sessionId, questions, answers]);
+    setResults({ correct, wrong, total: questions.length, passed });
+  }, [isFinished, sessionId, questions, confirmedAnswers, wrongCount]);
 
   const formatTime = (s: number) => {
     const m = Math.floor(s / 60);
@@ -132,17 +171,31 @@ const Test = () => {
     return `${m.toString().padStart(2, "0")}:${sec.toString().padStart(2, "0")}`;
   };
 
+  const goToNext = () => {
+    if (currentIndex < questions.length - 1) {
+      setCurrentIndex((p) => p + 1);
+      setSelectedOption(null);
+    }
+  };
+
+  const goToPrev = () => {
+    if (currentIndex > 0) {
+      setCurrentIndex((p) => p - 1);
+      setSelectedOption(null);
+    }
+  };
+
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <p className="text-muted-foreground">Yuklanmoqda...</p>
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <div className="animate-pulse text-muted-foreground text-lg">Yuklanmoqda...</div>
       </div>
     );
   }
 
   if (questions.length === 0) {
     return (
-      <div className="flex min-h-screen items-center justify-center flex-col gap-4">
+      <div className="flex min-h-screen items-center justify-center flex-col gap-4 bg-background">
         <p className="text-muted-foreground">Hozircha savollar mavjud emas</p>
         <Button onClick={() => navigate("/")}>Ortga</Button>
       </div>
@@ -150,153 +203,247 @@ const Test = () => {
   }
 
   const currentQ = questions[currentIndex];
+  const isAnswered = !!confirmedAnswers[currentQ.id];
 
   return (
-    <div className="min-h-screen bg-background p-4">
-      <div className="container mx-auto max-w-3xl space-y-4">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl font-bold">Avtotest</h1>
-          <div className={cn(
-            "flex items-center gap-2 px-4 py-2 rounded-lg font-mono text-lg font-bold",
-            timeLeft < 300 ? "bg-destructive/10 text-destructive" : "bg-muted"
-          )}>
-            <Clock className="w-5 h-5" />
-            {formatTime(timeLeft)}
-          </div>
-        </div>
-
-        {/* Progress */}
-        <div className="space-y-1">
-          <div className="flex justify-between text-sm text-muted-foreground">
-            <span>Savol {currentIndex + 1} / {questions.length}</span>
-            <span>{Object.keys(answers).length} ta javob berildi</span>
-          </div>
-          <Progress value={((currentIndex + 1) / questions.length) * 100} />
-        </div>
-
-        {/* Question */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg leading-relaxed">
-              {currentIndex + 1}. {currentQ.question_text}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {currentQ.image_url && (
-              <img
-                src={currentQ.image_url}
-                alt="Savol rasmi"
-                className="w-full max-h-64 object-contain rounded-lg border"
-              />
-            )}
-            <div className="space-y-2">
-              {currentQ.options.map((opt, i) => {
-                const isSelected = answers[currentQ.id] === opt.id;
-                const letter = String.fromCharCode(65 + i);
-
-                let optClass = "border-2 border-border bg-card hover:border-primary/50 cursor-pointer";
-                if (isFinished) {
-                  if (opt.is_correct) {
-                    optClass = "border-2 border-green-500 bg-green-50 text-green-800";
-                  } else if (isSelected && !opt.is_correct) {
-                    optClass = "border-2 border-red-500 bg-red-50 text-red-800";
-                  }
-                } else if (isSelected) {
-                  optClass = "border-2 border-primary bg-primary/5";
-                }
-
-                return (
-                  <button
-                    key={opt.id}
-                    onClick={() => selectAnswer(currentQ.id, opt.id)}
-                    disabled={isFinished}
-                    className={cn("w-full text-left p-4 rounded-xl transition-all flex items-start gap-3", optClass)}
-                  >
-                    <span className="w-8 h-8 rounded-full bg-muted flex items-center justify-center text-sm font-bold shrink-0">
-                      {letter}
-                    </span>
-                    <span className="pt-1">{opt.option_text}</span>
-                  </button>
-                );
-              })}
+    <div className="min-h-screen bg-background flex flex-col">
+      {/* Top bar */}
+      <header className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-30">
+        <div className="container mx-auto flex items-center justify-between px-4 py-3">
+          <h1 className="text-lg font-bold text-foreground">Avtotest</h1>
+          <div className="flex items-center gap-4">
+            {/* Wrong counter */}
+            <div className="flex items-center gap-1.5 text-sm">
+              <XCircle className="w-4 h-4 text-destructive" />
+              <span className={cn("font-bold", wrongCount > MAX_WRONG ? "text-destructive" : "text-muted-foreground")}>
+                {wrongCount}/{MAX_WRONG}
+              </span>
             </div>
-          </CardContent>
-        </Card>
-
-        {/* Navigation */}
-        <div className="flex items-center justify-between">
-          <Button
-            variant="outline"
-            onClick={() => setCurrentIndex((p) => Math.max(0, p - 1))}
-            disabled={currentIndex === 0}
-          >
-            <ChevronLeft className="w-4 h-4 mr-1" /> Oldingi
-          </Button>
-
-          {!isFinished && (
-            <Button variant="destructive" onClick={finishTest}>
-              <CheckCircle className="w-4 h-4 mr-1" /> Testni yakunlash
-            </Button>
-          )}
-
-          <Button
-            variant="outline"
-            onClick={() => setCurrentIndex((p) => Math.min(questions.length - 1, p + 1))}
-            disabled={currentIndex === questions.length - 1}
-          >
-            Keyingi <ChevronRight className="w-4 h-4 ml-1" />
-          </Button>
+            {/* Timer */}
+            <div className={cn(
+              "flex items-center gap-2 px-4 py-1.5 rounded-lg font-mono text-lg font-bold transition-colors",
+              timeLeft < 300
+                ? "bg-destructive/20 text-destructive"
+                : timeLeft < 600
+                ? "bg-warning/20 text-warning"
+                : "bg-muted text-foreground"
+            )}>
+              <Clock className="w-5 h-5" />
+              {formatTime(timeLeft)}
+            </div>
+          </div>
         </div>
+      </header>
 
-        {/* Question grid */}
-        <div className="flex flex-wrap gap-2 justify-center">
-          {questions.map((q, i) => {
-            let cls = "bg-muted text-muted-foreground";
-            if (isFinished) {
-              const sel = answers[q.id];
-              const selOpt = q.options.find((o) => o.id === sel);
-              if (selOpt?.is_correct) cls = "bg-green-500 text-white";
-              else if (sel) cls = "bg-red-500 text-white";
-              else cls = "bg-muted-foreground/30 text-muted-foreground";
-            } else if (answers[q.id]) {
-              cls = "bg-primary text-primary-foreground";
-            }
-            if (i === currentIndex && !isFinished) cls += " ring-2 ring-ring ring-offset-2";
-
-            return (
-              <button
-                key={q.id}
-                onClick={() => setCurrentIndex(i)}
-                className={cn("w-10 h-10 rounded-lg text-sm font-bold transition-all", cls)}
-              >
-                {i + 1}
-              </button>
-            );
-          })}
+      {/* Progress */}
+      <div className="container mx-auto px-4 pt-3">
+        <div className="flex justify-between text-xs text-muted-foreground mb-1">
+          <span>Savol {currentIndex + 1} / {questions.length}</span>
+          <span>{Object.keys(confirmedAnswers).length} ta javob berildi</span>
         </div>
-
-        {/* Results */}
-        {results && (
-          <Card className="border-2 border-primary">
-            <CardContent className="p-6 text-center space-y-4">
-              <h2 className="text-2xl font-bold">Test yakunlandi!</h2>
-              <div className="text-5xl font-black">
-                <span className="text-green-600">{results.correct}</span>
-                <span className="text-muted-foreground">/{results.total}</span>
-              </div>
-              <p className="text-muted-foreground">
-                {results.correct >= 16
-                  ? "🎉 Tabriklaymiz! Siz yaxshi natija ko'rsatdingiz!"
-                  : "😔 Afsuski, yetarli ball to'play olmadingiz. Qayta urinib ko'ring!"}
-              </p>
-              <Button onClick={() => navigate("/")} className="mt-4">
-                Bosh sahifaga qaytish
-              </Button>
-            </CardContent>
-          </Card>
-        )}
+        <Progress value={((currentIndex + 1) / questions.length) * 100} className="h-1.5" />
       </div>
+
+      {/* Main content: question left, image right */}
+      <main className="flex-1 container mx-auto px-4 py-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full">
+          {/* LEFT: Question + Options */}
+          <div className="space-y-4">
+            <div className="bg-card rounded-xl border border-border p-5">
+              <h2 className="text-lg font-semibold text-foreground leading-relaxed mb-4">
+                {currentIndex + 1}. {currentQ.question_text}
+              </h2>
+
+              <div className="space-y-2.5">
+                {currentQ.options.map((opt, i) => {
+                  const letter = String.fromCharCode(65 + i);
+                  const confirmed = confirmedAnswers[currentQ.id];
+                  const isThisSelected = selectedOption === opt.id;
+                  const isThisConfirmed = confirmed?.optionId === opt.id;
+
+                  let optClass = "border border-border bg-card hover:border-primary/50 cursor-pointer";
+
+                  if (isAnswered) {
+                    if (opt.is_correct) {
+                      optClass = "border-2 border-green-500 bg-green-500/10 text-green-400";
+                    } else if (isThisConfirmed && !opt.is_correct) {
+                      optClass = "border-2 border-red-500 bg-red-500/10 text-red-400";
+                    } else {
+                      optClass = "border border-border/50 bg-card/50 opacity-50";
+                    }
+                  } else if (isThisSelected) {
+                    optClass = "border-2 border-primary bg-primary/10 ring-1 ring-primary/30";
+                  }
+
+                  return (
+                    <button
+                      key={opt.id}
+                      onClick={() => {
+                        if (!isAnswered && !isFinished) setSelectedOption(opt.id);
+                      }}
+                      disabled={isAnswered || isFinished}
+                      className={cn(
+                        "w-full text-left p-3.5 rounded-xl transition-all flex items-center gap-3",
+                        optClass
+                      )}
+                    >
+                      <span className={cn(
+                        "w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold shrink-0",
+                        isAnswered && opt.is_correct
+                          ? "bg-green-500 text-white"
+                          : isAnswered && isThisConfirmed && !opt.is_correct
+                          ? "bg-red-500 text-white"
+                          : isThisSelected
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted text-muted-foreground"
+                      )}>
+                        {isAnswered && opt.is_correct ? "✓" : isAnswered && isThisConfirmed && !opt.is_correct ? "✗" : letter}
+                      </span>
+                      <span className="text-sm">{opt.option_text}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Confirm button */}
+              {!isAnswered && !isFinished && (
+                <Button
+                  className="w-full mt-4"
+                  size="lg"
+                  disabled={!selectedOption}
+                  onClick={confirmAnswer}
+                >
+                  <CheckCircle className="w-4 h-4 mr-2" />
+                  Tasdiqlash
+                </Button>
+              )}
+
+              {/* Answer feedback */}
+              {isAnswered && (
+                <div className={cn(
+                  "mt-4 p-3 rounded-lg text-sm font-medium flex items-center gap-2",
+                  confirmedAnswers[currentQ.id].isCorrect
+                    ? "bg-green-500/10 text-green-400 border border-green-500/30"
+                    : "bg-red-500/10 text-red-400 border border-red-500/30"
+                )}>
+                  {confirmedAnswers[currentQ.id].isCorrect ? (
+                    <><CheckCircle className="w-4 h-4" /> To'g'ri javob!</>
+                  ) : (
+                    <><XCircle className="w-4 h-4" /> Noto'g'ri javob</>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* RIGHT: Image */}
+          <div className="flex items-start justify-center">
+            {currentQ.image_url ? (
+              <div className="sticky top-20">
+                <img
+                  src={currentQ.image_url}
+                  alt="Savol rasmi"
+                  className="max-h-[70vh] w-auto object-contain rounded-xl border border-border cursor-pointer hover:opacity-90 transition-opacity"
+                  onClick={() => setLightboxSrc(currentQ.image_url)}
+                />
+                <p className="text-xs text-muted-foreground text-center mt-2">
+                  Kattalashtirish uchun bosing yoki <kbd className="px-1.5 py-0.5 bg-muted rounded text-xs">F</kbd> tugmasini bosing
+                </p>
+              </div>
+            ) : (
+              <div className="w-full h-64 bg-muted/30 rounded-xl border border-border/50 flex items-center justify-center">
+                <span className="text-muted-foreground text-sm">Rasm mavjud emas</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </main>
+
+      {/* Bottom navigation */}
+      <footer className="border-t border-border bg-card/50 backdrop-blur-sm sticky bottom-0 z-30">
+        <div className="container mx-auto px-4 py-3 space-y-3">
+          {/* Navigation buttons */}
+          <div className="flex items-center justify-between">
+            <Button variant="outline" size="sm" onClick={goToPrev} disabled={currentIndex === 0}>
+              <ChevronLeft className="w-4 h-4 mr-1" /> Oldingi
+            </Button>
+
+            {!isFinished && Object.keys(confirmedAnswers).length === questions.length && (
+              <Button variant="destructive" size="sm" onClick={() => finishTest()}>
+                Testni yakunlash
+              </Button>
+            )}
+
+            {!isFinished && (
+              <Button variant="outline" size="sm" onClick={goToNext} disabled={currentIndex === questions.length - 1}>
+                Keyingi <ChevronRight className="w-4 h-4 ml-1" />
+              </Button>
+            )}
+          </div>
+
+          {/* Question grid */}
+          <div className="flex flex-wrap gap-1.5 justify-center">
+            {questions.map((q, i) => {
+              const confirmed = confirmedAnswers[q.id];
+              let cls = "bg-muted text-muted-foreground";
+
+              if (confirmed) {
+                cls = confirmed.isCorrect
+                  ? "bg-green-500 text-white"
+                  : "bg-red-500 text-white";
+              }
+
+              if (i === currentIndex) cls += " ring-2 ring-primary ring-offset-2 ring-offset-background";
+
+              return (
+                <button
+                  key={q.id}
+                  onClick={() => { setCurrentIndex(i); setSelectedOption(null); }}
+                  className={cn("w-9 h-9 rounded-lg text-xs font-bold transition-all", cls)}
+                >
+                  {i + 1}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </footer>
+
+      {/* Results overlay */}
+      {results && (
+        <div className="fixed inset-0 z-40 bg-black/80 flex items-center justify-center p-4 animate-fade-in">
+          <div className={cn(
+            "bg-card rounded-2xl border-2 p-8 text-center space-y-4 max-w-md w-full",
+            results.passed ? "border-green-500" : "border-red-500"
+          )}>
+            {results.passed ? (
+              <CheckCircle className="w-16 h-16 mx-auto text-green-500" />
+            ) : (
+              <AlertTriangle className="w-16 h-16 mx-auto text-red-500" />
+            )}
+            <h2 className="text-2xl font-bold text-foreground">
+              {results.passed ? "Tabriklaymiz! ✅" : "Muvaffaqiyatsiz ❌"}
+            </h2>
+            <div className="text-4xl font-black">
+              <span className="text-green-500">{results.correct}</span>
+              <span className="text-muted-foreground"> / {results.total}</span>
+            </div>
+            <p className="text-muted-foreground">
+              {results.passed
+                ? "Siz testdan muvaffaqiyatli o'tdingiz!"
+                : `${results.wrong} ta xato javob berdingiz. 2 tadan ko'p xato qilish mumkin emas.`}
+            </p>
+            <Button onClick={() => navigate("/")} className="mt-4 w-full" size="lg">
+              Bosh sahifaga qaytish
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Image lightbox */}
+      {lightboxSrc && (
+        <ImageLightbox src={lightboxSrc} alt="Savol rasmi" onClose={() => setLightboxSrc(null)} />
+      )}
     </div>
   );
 };
