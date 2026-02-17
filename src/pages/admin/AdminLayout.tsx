@@ -1,10 +1,11 @@
 import { useAuth } from "@/hooks/useAuth";
 import { Navigate, Outlet, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Car, FileQuestion, Users, LogOut, Home } from "lucide-react";
+import { Car, FileQuestion, Users, LogOut, Home, LayoutDashboard } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
+  { label: "Dashboard", icon: LayoutDashboard, path: "/admin" },
   { label: "Savollar", icon: FileQuestion, path: "/admin/questions" },
   { label: "Foydalanuvchilar", icon: Users, path: "/admin/users" },
 ];

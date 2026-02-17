@@ -9,6 +9,7 @@ import Login from "./pages/Login";
 import Test from "./pages/Test";
 import Profile from "./pages/Profile";
 import AdminLayout from "./pages/admin/AdminLayout";
+import AdminDashboard from "./pages/admin/AdminDashboard";
 import Questions from "./pages/admin/Questions";
 import Users from "./pages/admin/Users";
 import NotFound from "./pages/NotFound";
@@ -28,7 +29,7 @@ const App = () => (
             <Route path="/test" element={<Test />} />
             <Route path="/profile" element={<Profile />} />
             <Route path="/admin" element={<AdminLayout />}>
-              <Route index element={<Questions />} />
+              <Route index element={<AdminDashboard />} />
               <Route path="questions" element={<Questions />} />
               <Route path="users" element={<Users />} />
             </Route>
