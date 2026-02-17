@@ -21,39 +21,52 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<AuthContextType["profile"]>(null);
 
   const checkRole = async (userId: string) => {
-    const { data } = await supabase.rpc("has_role", { _user_id: userId, _role: "admin" });
-    setIsAdmin(!!data);
+    try {
+      const { data } = await supabase.rpc("has_role", { _user_id: userId, _role: "admin" });
+      setIsAdmin(!!data);
+    } catch {
+      setIsAdmin(false);
+    }
   };
 
   const fetchProfile = async (userId: string) => {
-    const { data } = await supabase
-      .from("profiles")
-      .select("full_name, expires_at, is_active")
-      .eq("user_id", userId)
-      .maybeSingle();
-    setProfile(data);
+    try {
+      const { data } = await supabase
+        .from("profiles")
+        .select("full_name, expires_at, is_active")
+        .eq("user_id", userId)
+        .maybeSingle();
+      setProfile(data);
+    } catch {
+      setProfile(null);
+    }
   };
 
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      const u = session?.user ?? null;
-      setUser(u);
-      if (u) {
-        await checkRole(u.id);
-        await fetchProfile(u.id);
-      } else {
-        setIsAdmin(false);
-        setProfile(null);
-      }
-      setIsLoading(false);
-    });
-
+    // First get existing session
     supabase.auth.getSession().then(({ data: { session } }) => {
       const u = session?.user ?? null;
       setUser(u);
       if (u) {
         checkRole(u.id);
         fetchProfile(u.id);
+      }
+      setIsLoading(false);
+    });
+
+    // Then listen for changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const u = session?.user ?? null;
+      setUser(u);
+      if (u) {
+        // Use setTimeout to avoid Supabase deadlock with auth token
+        setTimeout(() => {
+          checkRole(u.id);
+          fetchProfile(u.id);
+        }, 0);
+      } else {
+        setIsAdmin(false);
+        setProfile(null);
       }
       setIsLoading(false);
     });
