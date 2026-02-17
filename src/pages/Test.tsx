@@ -20,7 +20,7 @@ const TIME_LIMIT = 25 * 60;
 const MAX_WRONG = 2;
 
 const Test = () => {
-  const { user } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
   const navigate = useNavigate();
   const [questions, setQuestions] = useState<QuestionWithOptions[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -33,6 +33,13 @@ const Test = () => {
   const [results, setResults] = useState<{ correct: number; wrong: number; total: number; passed: boolean } | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [wrongCount, setWrongCount] = useState(0);
+
+  // Redirect if not logged in
+  useEffect(() => {
+    if (!authLoading && !user) {
+      navigate("/login");
+    }
+  }, [user, authLoading, navigate]);
 
   // Fetch random questions
   useEffect(() => {
