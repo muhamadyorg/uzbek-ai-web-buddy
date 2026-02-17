@@ -37,9 +37,9 @@ const Login = () => {
     const { error } = await signIn(email, password);
     if (error) {
       setError("Login yoki parol noto'g'ri");
+      setLoading(false);
     }
-    // Navigation handled by useEffect watching user state
-    setLoading(false);
+    // Navigation is handled by useEffect when user state changes
   };
 
   return (
